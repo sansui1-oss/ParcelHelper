@@ -13,5 +13,7 @@ import Foundation
        precondition(p.pickupCode == code, "code failure: \(p.pickupCode)")
     }
     print("PASS 3 Douyin parser tests")
+    ParcelStatusTests.runAll()
+    MiErrorTests.runAll()
   }
 }

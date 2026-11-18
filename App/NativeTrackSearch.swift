@@ -217,6 +217,18 @@ struct NativeTrackSearchPage: View {
         if !r.receiverCity.isEmpty { item.receiverCity=r.receiverCity }
         if !r.receiverAddress.isEmpty { item.receiverAddress=r.receiverAddress }
         item.trackUpdatedAt=Date().timeIntervalSince1970*1000
+        // Manual lookup used to store only the track text and leave
+        // status = 1, so a parcel whose latest node already said "已取件"
+        // / "本人签收" / "已送达" kept showing "运输中" in the list.
+        // Persist the derived state now: latestPickupConfirmed already
+        // covers explicit pickup wording and direct delivery with no
+        // code and no station, so a picked parcel is stored as done.
+        if item.latestPickupConfirmed {
+            item.status = 2
+            if item.pickedAt == nil { item.pickedAt = Date().timeIntervalSince1970 * 1000 }
+        } else if item.isPending, item.arrivedAt == nil {
+            item.arrivedAt = Date().timeIntervalSince1970 * 1000
+        }
         if item.source == nil {
             item.source="kdniao"
             item.srcApp=SourceApp(id:"kdniao",name:"快递鸟")

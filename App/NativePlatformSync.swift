@@ -214,9 +214,17 @@ private enum SyncJSON {
         let noPickup = ["转运中心", "分拨中心", "集散中心", "运转中心", "揽收", "正在派送", "派件中"]
         // "已签收" can mean an express station signed on behalf of the user.
         // Only unequivocal pickup wording should mark an item as collected.
-        let signedTerms = ["已取走", "您已取件", "本人签收",
-                           "已领取", "取件完成", "用户已取", "取件成功",
-                           "已被取走", "已被领取", "用户取件成功", "收件人已取"]
+        // Bare "已取件" / "已取出" were missing from this list (only the
+        // 您-prefixed forms were here), so a plain pickup node stayed
+        // "transit" in the merge layer even though Models.swift already
+        // recognised the same wording via latestPickupConfirmed.
+        let signedTerms = ["已取走", "已取件", "已取出", "您已取件", "本人签收",
+                           "本人已签收", "签收人：本人", "签收人本人",
+                           "已领取", "取件完成", "取件已完成", "已完成取件",
+                           "完成取件", "完成取货", "取货成功",
+                           "用户已取", "取件成功",
+                           "已被取走", "已被领取", "用户取件成功", "收件人已取",
+                           "已从驿站取出", "已从快递柜取出"]
         let waitingForSignature = ["待签收", "等待签收", "签收中",
                                    "快递员已取件", "揽收取件", "待取件",
                                    "未取件", "请取件"].contains(where: { text.contains($0) })
@@ -327,6 +335,25 @@ private enum SyncJSON {
                     p.pickedAt = p.pickedAt ?? Date().timeIntervalSince1970 * 1000
                 } else if wasArrived && p.arrivedAt == nil {
                     p.arrivedAt = Date().timeIntervalSince1970 * 1000
+                }
+                // Direct delivery, no station and no pickup code: a signed /
+                // delivered event with nowhere left to pick the parcel up
+                // from means the recipient already has it. Without this,
+                // an existing parcel whose latest node is only "已签收" or
+                // "已送达" stayed "运输中" forever in the merge layer.
+                // Station parcels are excluded: they carry a code or a
+                // station name, and their "已签收" is the station signing.
+                let directDelivered = ["已签收", "签收成功", "已妥投", "已送达",
+                                       "已送达收件人", "收件人签收", "SIGN"]
+                    .contains(where: { currentStatus.contains($0) })
+                    && !["驿站", "快递柜", "代收点", "自提点", "丰巢"]
+                        .contains(where: { currentStatus.contains($0) })
+                let hasPickupCode = !p.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !p.codes.isEmpty
+                let hasStationName = !p.courierStationName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || !row.station.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                if p.status != 2 && directDelivered && !hasPickupCode && !hasStationName {
+                    p.status = 2
+                    p.pickedAt = p.pickedAt ?? Date().timeIntervalSince1970 * 1000
                 }
             }
             if wasArrived { p.eta = nil; p.etaAt = nil }

@@ -9,6 +9,24 @@ import Security
 // AES-ECB, and Xiaomi STS exchange are not official public API contracts.
 // No service-token or cookie values are logged or exposed to the UI.
 
+// Pure, testable rendering of a Xiaomi business error. Kept outside the
+// @MainActor enum so unit tests can call it without an actor context.
+// Endpoint names come from upstream; the server-message part is the
+// 2026-11-18 addition (it used to be dropped, so 4001 showed as a number).
+func miEndpointErrorText(path: String, code: String, serverMessage: String) -> String {
+    let endpoint = path.hasSuffix("/getList") ? "包裹列表"
+        : path.hasSuffix("/query") ? "物流详情"
+        : path.hasSuffix("/sendVerificationCode") ? "发送验证码"
+        : path.hasSuffix("/checkVerificationCode") ? "校验验证码"
+        : path.hasSuffix("/bind") ? "绑定手机号" : "快递服务"
+    let detail = serverMessage.isEmpty ? "" : "：" + serverMessage
+    let hint = code == "4001"
+        ? "。可能是 assistant 会话不被服务端接受，建议解除小米授权后重新扫码登录；若仍为 4001，说明该服务可能限制第三方客户端"
+        : "。请检查官方账号验证与服务状态"
+    return "小米" + endpoint + "失败（服务代码 " +
+        (code.isEmpty ? "未知" : code) + detail + "）" + hint
+}
+
 @MainActor enum NativeMiExpress {
     private static let host = "https://verca.xpa.assistant.miui.com"
     private static let aesKey = "d101b17c77ff93cs"
@@ -335,20 +353,15 @@ import Security
         guard isSuccess(result) else {
             // Do not log response bodies or secrets. Preserve the endpoint and
             // server code so failed phone binding can be distinguished from
-            // authentication and parcel-list errors.
+            // authentication and parcel-list errors. Also keep the server's
+            // own desc/message: the earlier code dropped it, so a 4001 only
+            // ever showed as a bare number.
             let status = json(result["status"])
             let errorCode = first(result, ["code", "error_code"]).isEmpty
                 ? first(status, ["code"]) : first(result, ["code", "error_code"])
-            let endpoint = path.hasSuffix("/getList") ? "包裹列表"
-                : path.hasSuffix("/query") ? "物流详情"
-                : path.hasSuffix("/sendVerificationCode") ? "发送验证码"
-                : path.hasSuffix("/checkVerificationCode") ? "校验验证码"
-                : path.hasSuffix("/bind") ? "绑定手机号" : "快递服务"
-            let hint = errorCode == "4001"
-                ? "。可能是 assistant 会话不被服务端接受，建议解除小米授权后重新扫码登录；若仍为 4001，说明该服务可能限制第三方客户端"
-                : "。请检查官方账号验证与服务状态"
-            throw NativeSyncError.unavailable("小米" + endpoint + "失败（服务代码 " +
-                                              (errorCode.isEmpty ? "未知" : errorCode) + "）" + hint)
+            let fromResult = first(result, ["desc", "message", "msg", "errorMsg", "error_msg"])
+            let serverMessage = fromResult.isEmpty ? first(status, ["desc", "message", "msg"]) : fromResult
+            throw NativeSyncError.unavailable(miEndpointErrorText(path: path, code: errorCode, serverMessage: serverMessage))
         }
         return result
     }

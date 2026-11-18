@@ -48,17 +48,50 @@ struct Parcel: Codable, Identifiable, Hashable {
     /// tracking event even when platform summary still says "in transit".
     /// Never infer collection from a generic signed-by-station event.
     var latestPickupConfirmed: Bool {
-        let latestNode = trackNodes.first?.text ?? ""
-        let summary = trackLatest ?? ""
-        let terms = ["您已取件", "您已取走", "用户已取", "用户取件成功",
-                     "取件成功", "取件完成", "已取走", "包裹已取走",
+        // The newest node is not always the pickup event: a provider can
+        // append a generic summary node after the actual pickup node, so
+        // scan every node plus the summary instead of only the first one.
+        let texts = ([trackLatest ?? ""] + trackNodes.map(\.text))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        // Bare "已取件" / "已取出" were missing: the old list only matched
+        // them when prefixed with 您/用户, so a plain "快件已取件" node
+        // stayed "运输中" even though the parcel was already collected.
+        let terms = ["您已取件", "已取件", "您已取走", "已取走", "已取出",
+                     "用户已取", "用户取件成功", "取件成功", "取件完成",
+                     "取件已完成", "已完成取件", "完成取件", "完成取货",
+                     "取货成功", "包裹已取走",
                      "已被取走", "已领取", "已被领取", "本人签收",
-                     "收件人已取", "收件人取件", "已从驿站取出"]
+                     "本人已签收", "签收人：本人", "签收人本人",
+                     "收件人已取", "收件人取件", "已从驿站取出",
+                     "已从快递柜取出"]
         let exclusions = ["快递员已取件", "揽收取件", "商家已取件", "驿站代签收",
                           "代为签收", "待取件", "请取件", "未取件"]
-        let newest = !latestNode.isEmpty ? latestNode : summary
-        guard !exclusions.contains(where: newest.contains) else { return false }
-        return terms.contains(where: newest.contains)
+        for text in texts {
+            guard !exclusions.contains(where: { text.contains($0) }) else { continue }
+            if terms.contains(where: { text.contains($0) }) { return true }
+        }
+        // Direct delivery (no station, no pickup code): a "已签收 / 已送达 /
+        // 已妥投" event with nowhere left to pick the parcel up from means
+        // the recipient already has it. This mirrors the original
+        // platformSync rule (delivered + no code + no station = picked).
+        // Station parcels are excluded here: they have a code or a station
+        // name, and a station "已签收" is the station signing, not the user.
+        let hasCode = !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !codes.isEmpty
+        // Only the dedicated station field counts here: `address` in this
+        // model is often the recipient's home address, not a station.
+        let hasStation = !courierStationName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if !hasCode && !hasStation {
+            let delivered = ["已签收", "签收成功", "已妥投", "已送达",
+                             "已送达收件人", "收件人签收"]
+            let stationWords = ["驿站", "快递柜", "代收点", "自提点", "丰巢"]
+            for text in texts {
+                guard !exclusions.contains(where: { text.contains($0) }) else { continue }
+                guard !stationWords.contains(where: { text.contains($0) }) else { continue }
+                if delivered.contains(where: { text.contains($0) }) { return true }
+            }
+        }
+        return false
     }
     var isDone: Bool { status == 2 || pickedByUser || latestPickupConfirmed }
     // The courier marked this package delivered, not necessarily picked up
