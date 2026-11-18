@@ -15,5 +15,8 @@ import Foundation
     print("PASS 3 Douyin parser tests")
     ParcelStatusTests.runAll()
     MiErrorTests.runAll()
+    DedupeTests.runAll()
+    NeedsClaimTests.runAll()
+    LooseOrderTests.runAll()
   }
 }

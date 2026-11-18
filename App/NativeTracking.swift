@@ -16,6 +16,19 @@ struct NativeTrackLookup {
     var receiverAddress: String = ""
     var provider: String = ""
 }
+/// Port of Scripting kdniao.ts needsClaim: is the Kdniao server telling us
+/// to claim a free trial package? Only then may a client auto-claim.
+/// Already-claimed, expired, or paywalled wording is not claimable.
+/// Kept as a free function so unit tests can call it without an actor.
+func kdniaoNeedsClaim(_ reason: String) -> Bool {
+    let text = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !text.isEmpty else { return false }
+    let excluded = ["已领取", "已领过", "已使用", "已过期", "购买", "充值", "开通"]
+    if excluded.contains(where: text.contains) { return false }
+    let pattern = #"(请|需要|可|去).{0,8}领取|未领取|领取.{0,6}(试用|免费)|(试用|免费).{0,6}领取"#
+    return text.range(of: pattern, options: .regularExpression) != nil
+}
+
 @MainActor enum NativeTracking {
     private static let service = "com.muxui.ParcelHelper.kdniao"
     static let shippers: [(String, String)] = [
@@ -122,6 +135,9 @@ struct NativeTrackLookup {
         }
         return ""
     }
+    /// Port of Scripting kdniao.ts needsClaim; implementation is the free
+    /// function kdniaoNeedsClaim above so tests can call it directly.
+    static func needsClaim(_ reason: String) -> Bool { kdniaoNeedsClaim(reason) }
     static func lookup(_ mailRaw:String, source:String?=nil, shipperCode:String="",
                        phone:String="") async throws -> NativeTrackLookup {
         let mail=mailRaw.trimmingCharacters(in:.whitespacesAndNewlines)
@@ -180,6 +196,14 @@ struct NativeTrackLookup {
             let reason=json["Reason"] as? String ?? "查询失败"
             if reason.contains("手机尾号") {
                 throw NativeSyncError.verify(reason+"，请填写收件人手机号后四位")
+            }
+            // Only when the server explicitly says to claim a trial does
+            // the message say so. Auto-claim is NOT implemented here: the
+            // Swift app has no Kdniao user token / login flow, so claiming
+            // stays a manual step on the Kdniao website. Every other
+            // failure keeps the server's own wording.
+            if kdniaoNeedsClaim(reason) {
+                throw NativeSyncError.unavailable("快递鸟：" + reason + "。可领取免费试用名额，领取后重试（App 内暂不支持自动领取）")
             }
             throw NativeSyncError.unavailable("快递鸟："+reason)
         }

@@ -67,7 +67,7 @@ private enum SyncJSON {
     }
 }
 
-@MainActor private enum WebCookieRequest {
+@MainActor enum WebCookieRequest {
     static let store = WKWebsiteDataStore.default().httpCookieStore
     static func cookies(domain: String) async -> [HTTPCookie] {
         await store.allCookies().filter {
@@ -153,13 +153,38 @@ private enum SyncJSON {
 }
 
 @MainActor enum NativeParcelSync {
-    static let platforms = ["pdd", "cainiao", "fengchao", "mi"]
+    static let platforms = ["pdd", "cainiao", "fengchao", "mi", "vip", "dewu"]
     // Throttle user-triggered refreshes too: no bursts into private endpoints.
     static let minGap: TimeInterval = 30
+    // Shared "just checked" grace (Scripting v1.2.1 widgetRefresh): a
+    // platform that synced successfully less than 10 minutes ago is not
+    // fetched again unless the call is forced. No App Group is involved:
+    // this app has no home-screen widget; Live Activity is pushed
+    // from the app itself.
+    static let recentGrace: TimeInterval = 10 * 60
+
+    static func displayName(_ id: String) -> String {
+        switch id {
+        case "pdd": return "拼多多驿站包裹"
+        case "cainiao": return "菜鸟"
+        case "fengchao": return "丰巢"
+        case "mi": return "小米"
+        case "vip": return "唯品会"
+        case "dewu": return "得物"
+        default: return id
+        }
+    }
 
     static func run(_ id: String, force: Bool = false) async throws -> NativeSyncResult {
         guard platforms.contains(id) else {
             throw NativeSyncError.unavailable("该平台尚未完成 Swift 原生查询适配")
+        }
+        if !force {
+            let lastSuccess = UserDefaults.standard.double(forKey: "native.sync.success." + id)
+            if lastSuccess > 0 && Date().timeIntervalSince1970 - lastSuccess < recentGrace {
+                return NativeSyncResult(name: displayName(id), found: 0, imported: 0,
+                                        errors: ["10 分钟内已同步过，已跳过"])
+            }
         }
         let key = "native.sync.at." + id
         let last = UserDefaults.standard.double(forKey: key)
@@ -172,10 +197,12 @@ private enum SyncJSON {
             if id == "pdd" { incoming = try await pddPackages() }
             else if id == "cainiao" { incoming = try await cainiaoPackages() }
             else if id == "fengchao" { incoming = try await NativeFengchao.packages() }
+            else if id == "vip" { incoming = try await NativeVip.packages() }
+            else if id == "dewu" { incoming = try await NativeDewu.packages() }
             else { incoming = try await NativeMiExpress.packages() }
             let count = merge(incoming)
             let result = NativeSyncResult(
-                name: id == "pdd" ? "拼多多驿站包裹" : (id == "cainiao" ? "菜鸟" : (id == "fengchao" ? "丰巢" : "小米")),
+                name: displayName(id),
                 found: incoming.count, imported: count, errors: [])
             UserDefaults.standard.set(result.description, forKey: "native.sync.result." + id)
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "native.sync.success." + id)
@@ -264,7 +291,7 @@ private enum SyncJSON {
                 continue
             }
             let normalizedMail = codeKey(mail)
-            let previous = store.snapshot.parcels.first(where: {
+            var previous = store.snapshot.parcels.first(where: {
                 (!normalizedMail.isEmpty && codeKey($0.mailNo ?? "") == normalizedMail) ||
                 (!orderKey.isEmpty && $0.orderId == orderKey &&
                  (mail.isEmpty || ($0.mailNo ?? "").isEmpty ||
@@ -283,6 +310,18 @@ private enum SyncJSON {
             // An old order with no actual route detail should not become a
             // new fake in-transit shipment.
             if previous == nil && !wasArrived && row.latest.isEmpty && row.tracks.isEmpty { continue }
+            // Central dedupe, AFTER the guards above: the same mail number
+            // (normalized) or the same platform order id with a different
+            // mail number still belongs to the same card. Running it here
+            // keeps the guards seeing a genuinely new picked/signed parcel
+            // as new, so they still drop it.
+            if previous == nil {
+                previous = store.findDuplicate(mailNo: mail, orderId: orderKey)
+            }
+            // Vipshop / Dewu orders without a mail number only update an
+            // existing card, never create a new one (Scripting
+            // platformSync.ts: same rule as Pinduoduo).
+            if (row.source == "vip" || row.source == "dewu") && previous == nil && mail.isEmpty { continue }
             var p = previous ?? Parcel()
             let priorSource = p.source
             let oldNodes = p.trackNodes
@@ -295,7 +334,8 @@ private enum SyncJSON {
                 (!isAggregator(row.source) && isAggregator(priorSource)) {
                 p.source = row.source
                 let names = ["pdd": "拼多多", "cainiao": "菜鸟", "taobao": "淘宝",
-                             "jd": "京东", "fengchao": "丰巢", "mi": "小米"]
+                             "jd": "京东", "fengchao": "丰巢", "mi": "小米",
+                             "vip": "唯品会", "dewu": "得物"]
                 p.srcApp = SourceApp(id: row.source, name: names[row.source] ?? row.source)
             }
             if (p.itemTitle == nil || p.itemTitle?.isEmpty == true ||
@@ -610,8 +650,9 @@ private enum SyncJSON {
 
     // Original utils/cainiao.ts: trackMailNo() with a PID query first, falling
     // back to carrier detection + queryalltrace. A failed trace lookup does not
-    // invalidate the rest of the order-list import.
-    private static func cainiaoTrack(_ mail: String) async -> (company: String, nodes: [TrackNode])? {
+    // invalidate the rest of the order-list import. Shared with the Vipshop
+    // import, which looks up tracks for parcels that have a mail number.
+    static func cainiaoTrack(_ mail: String) async -> (company: String, nodes: [TrackNode])? {
         var result: [String: Any]?
         do {
             result = try await mtop("mtop.cainiao.logisticsdetail.packages.pid.orderCode.mailNo.get",
@@ -841,6 +882,10 @@ private enum SyncJSON {
                 continue
             }
             if id == "fengchao" && !NativeFengchao.hasSession { continue }
+            // Dewu needs a foreground WebView to hook the order page; it is
+            // never polled automatically.
+            if id == "dewu" { continue }
+            if id == "vip" && !await NativeVip.hasLogin() { continue }
             if id == "pdd" {
                 let platformCookies = await WebCookieRequest.cookies(domain: "yangkeduo.com")
                 if PddSessionVault.token.isEmpty && platformCookies.isEmpty { continue }

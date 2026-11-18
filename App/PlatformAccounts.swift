@@ -51,6 +51,8 @@ private enum PlatformCatalog {
         .init(id: "pdd", title: "拼多多", login: URL(string: "https://mobile.yangkeduo.com/login.html"), validCookie: "PDDAccessToken", domain: "yangkeduo.com", note: "网页登录", home: URL(string: "https://mobile.yangkeduo.com/") ),
         .init(id: "fengchao", title: "丰巢", login: nil, validCookie: nil, domain: nil, note: "平台入口", home: URL(string: "https://www.fcbox.com/") ),
         .init(id: "mi", title: "小米快递聚合", login: nil, validCookie: nil, domain: nil, note: "平台入口", home: URL(string: "https://www.mi.com/") ),
+        .init(id: "vip", title: "唯品会", login: URL(string: "https://m.vip.com/v3/index.html#/pages/userCenter/userCenter"), validCookie: "VIP_TANK", domain: "vip.com", note: "网页登录", home: URL(string: "https://m.vip.com/") ),
+        .init(id: "dewu", title: "得物", login: URL(string: "https://m.dewu.com/router/order/buyer/orderList"), validCookie: "X-Auth-Token", domain: "dewu.com", note: "网页登录", home: URL(string: "https://m.dewu.com/") ),
         .init(id: "douyin", title: "抖音", login: nil, validCookie: nil, domain: nil, note: "平台入口", home: URL(string: "https://www.douyin.com/") )
     ]
 }
@@ -80,9 +82,18 @@ private enum PlatformCatalog {
         if !enabled(p.id) { return false }
         if p.id == "pdd" && !PddSessionVault.token.isEmpty { return true }
         guard let marker = p.validCookie, let domain = p.domain else { return false }
+        // Some platforms accept more than one login cookie: Vipshop counts
+        // VIP_TANK, m_vipruid or WAP[login] (VipRUID alone does not count);
+        // Dewu counts X-Auth-Token, xAuthToken or duToken.
+        let markers: [String]
+        switch p.id {
+        case "vip": markers = ["VIP_TANK", "m_vipruid", "WAP[login]"]
+        case "dewu": markers = ["X-Auth-Token", "xAuthToken", "duToken"]
+        default: markers = [marker]
+        }
         let cookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
         return cookies.contains { cookie in
-            (cookie.name == marker || ((p.id == "taobao" || p.id == "cainiao") && cookie.name == "tracknick")) &&
+            (markers.contains(cookie.name) || ((p.id == "taobao" || p.id == "cainiao") && cookie.name == "tracknick")) &&
             !cookie.value.isEmpty &&
             (cookie.domain == domain || cookie.domain.hasSuffix("." + domain)) &&
             (cookie.expiresDate == nil || cookie.expiresDate! > Date())
@@ -107,13 +118,24 @@ private enum PlatformCatalog {
 private struct PlatformBrandMark: View {
     let id: String
     var body: some View {
-        Image("brand_" + id)
-            .resizable()
-            .interpolation(.high)
-            .scaledToFill()
-            .frame(width: 42, height: 42)
-            .clipShape(Circle())
-            .accessibilityLabel(id)
+        Group {
+            if UIImage(named: "brand_" + id) != nil {
+                Image("brand_" + id)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFill()
+                    .frame(width: 42, height: 42)
+                    .clipShape(Circle())
+            } else {
+                // No brand asset yet (Vipshop / Dewu): a neutral badge
+                // instead of an empty circle.
+                Circle()
+                    .fill(Color.secondary.opacity(0.18))
+                    .frame(width: 42, height: 42)
+                    .overlay { Image(systemName: "bag.fill").foregroundStyle(.secondary) }
+            }
+        }
+        .accessibilityLabel(id)
     }
 }
 

@@ -1472,7 +1472,13 @@ struct StationsHome: View {
     @EnvironmentObject private var store: ParcelStore
     @State private var creating = false
     var body: some View {
-        List { ForEach(store.snapshot.stations) { s in NavigationLink { StationEditor(station: s) } label: {
+        List {
+            if store.snapshot.stations.isEmpty {
+                Text("还没有驿站记录，有包裹到站后会自动建档，也可以点右上角加号手动添加。")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(store.snapshot.stations) { s in NavigationLink { StationEditor(station: s) } label: {
             VStack(alignment: .leading) { Text(s.courierStationName).bold(); Text(s.address).font(.caption).foregroundStyle(.secondary) }
         } }.onDelete { offsets in for i in offsets { store.removeStation(store.snapshot.stations[i].id) } } }
         .navigationTitle("驿站管理")

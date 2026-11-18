@@ -233,6 +233,10 @@ struct NativeTrackSearchPage: View {
             item.source="kdniao"
             item.srcApp=SourceApp(id:"kdniao",name:"快递鸟")
         }
+        // Manual save: the user explicitly re-added this shipment, so a
+        // previous manual delete must not let the next platform sync
+        // suppress it again.
+        store.removeDeletion(mail: r.mailNo, order: item.orderId ?? "")
         store.upsert(item)
         dismiss()
     }

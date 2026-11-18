@@ -46,6 +46,8 @@ struct CourierBrandView: View {
         case "cainiao": return ("菜", Color(red: 0.17, green: 0.48, blue: 0.95))
         case "fengchao": return ("丰", Color(red: 0.93, green: 0.58, blue: 0.06))
         case "mi": return ("米", Color(red: 1.0, green: 0.42, blue: 0.06))
+        case "vip": return ("唯", Color(red: 0.85, green: 0.10, blue: 0.20))
+        case "dewu": return ("得", .black)
         case "douyin": return ("抖", .black)
         case "kdniao": return ("快", .blue)
         default: return nil

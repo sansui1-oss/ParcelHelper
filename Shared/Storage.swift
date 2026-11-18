@@ -1,6 +1,29 @@
 import Foundation
 import Combine
 
+// Shared mail/code normalization: fullwidth to halfwidth, strip
+// whitespace and -－—_, uppercase. A free function so the dedupe keys
+// (and their tests) can use it without touching the @MainActor store.
+func parcelNormalizedCodeKey(_ raw: String) -> String {
+    let half = raw.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? raw
+    return half.filter { !$0.isWhitespace && !"-－—_".contains($0) }.uppercased()
+}
+
+// Dedupe identities for one parcel, usable from tests without a store
+// instance. Mail numbers are normalized the same way as
+// NativeParcelSync.codeKey; order ids are only uppercased, so a platform
+// order id matches exactly.
+func parcelDuplicateKeys(mailNo: String, orderId: String) -> [String] {
+    var result: [String] = []
+    let mail = parcelNormalizedCodeKey(mailNo)
+    if mail.range(of: #"^[A-Z0-9]{8,40}$"#, options: .regularExpression) != nil {
+        result.append("mail:" + mail)
+    }
+    let order = orderId.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    if !order.isEmpty { result.append("order:" + order) }
+    return result
+}
+
 @MainActor final class ParcelStore: ObservableObject {
     static let shared = ParcelStore()
     @Published private(set) var snapshot: Snapshot
@@ -14,16 +37,13 @@ import Combine
     // Tombstones prevent a removed delivery from being silently recreated by
     // the next automatic platform refresh.
     private static let ignoredKey = "native.deleted.shipments.v1"
+    /// Shared with NativeParcelSync.codeKey: fullwidth to halfwidth, strip
+    /// whitespace and -－—_, uppercase. Both sides of every comparison use
+    /// this, so a mail number typed with a fullwidth digit or a dash still
+    /// matches the stored one.
     private static func normalized(_ raw: String) -> String {
-        raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: " ", with: "")
-            .uppercased()
+        parcelNormalizedCodeKey(raw)
     }
-    private static func key(mail: String, order: String, source: String,
-                            code: String = "", station: String = "") -> String? {
-        keys(mail: mail, order: order, source: source, code: code, station: station).first
-    }
-
     // Track every stable identity available at deletion time. A later sync can
     // supply a tracking number missing in the first import; a one-key tombstone
     // would allow the same explicitly deleted package to reappear.
@@ -46,13 +66,32 @@ import Combine
 
     func isDeletedShipment(source: String, order: String, mail: String,
                            code: String = "", station: String = "") -> Bool {
-        // Prefer the strongest identity supplied by the new shipment.
-        // A pickup code can be reused at a station, so it must not suppress
-        // a *different* tracking number merely because its code matches.
-        guard let preferred = Self.key(mail: mail, order: order, source: source,
-                                       code: code, station: station) else { return false }
+        // Match ANY identity of the parcel, not just the strongest one:
+        // a later sync can supply a tracking number that the deleted
+        // record did not have, and a one-key tombstone would let the same
+        // explicitly deleted package reappear under its other identity.
+        // The pickup key still requires source + code + station together,
+        // so a bare reused pickup code alone cannot suppress a different
+        // tracking number.
+        let candidates = Self.keys(mail: mail, order: order, source: source,
+                                   code: code, station: station)
+        guard !candidates.isEmpty else { return false }
         let ignored = Set(UserDefaults.standard.stringArray(forKey: Self.ignoredKey) ?? [])
-        return ignored.contains(preferred)
+        return candidates.contains(where: ignored.contains)
+    }
+
+    /// A user who manually re-adds a deleted parcel (manual lookup or
+    /// import confirm) must not have it suppressed again by the next
+    /// platform sync. Call this from manual-save paths before upserting.
+    func removeDeletion(mail: String, order: String, source: String = "",
+                        code: String = "", station: String = "") {
+        let candidates = Self.keys(mail: mail, order: order, source: source,
+                                   code: code, station: station)
+        guard !candidates.isEmpty else { return }
+        var ignored = UserDefaults.standard.stringArray(forKey: Self.ignoredKey) ?? []
+        let doomed = Set(candidates)
+        ignored.removeAll(where: doomed.contains)
+        UserDefaults.standard.set(ignored, forKey: Self.ignoredKey)
     }
 
     private func recordDeletion(_ parcel: Parcel) {
@@ -70,54 +109,95 @@ import Combine
 
     /// Merge only exact carrier tracking numbers (or identical legacy order
     /// IDs without tracking numbers). Product titles are NOT unique identities.
+    /// Port of Scripting utils/dedupe.ts: every parcel registers all of its
+    /// identities (mail number and platform order id), and merging re-indexes
+    /// every key of the merged record to the survivor, so A==B and B==C
+    /// collapse transitively instead of leaving a stray copy behind.
     private static func collapseExactDuplicates(_ items: [Parcel]) -> [Parcel] {
         var merged: [Parcel] = []
         var indices: [String: Int] = [:]
         for parcel in items {
-            let source = parcel.source ?? parcel.srcApp?.id ?? ""
-            let key = Self.key(mail: parcel.mailNo ?? "", order: parcel.orderId ?? "",
-                               source: source)
-            guard let key else { merged.append(parcel); continue }
-            if let i = indices[key] {
-                var existing = merged[i]
-                if existing.userTitle == nil { existing.userTitle = parcel.userTitle }
-                if existing.itemTitle == nil || existing.itemTitle == "拼多多订单" {
-                    if let title = parcel.itemTitle, !title.isEmpty { existing.itemTitle = title }
+            let keys = parcelDuplicateKeys(mailNo: parcel.mailNo ?? "", orderId: parcel.orderId ?? "")
+            guard !keys.isEmpty else { merged.append(parcel); continue }
+            var at: Int?
+            for k in keys {
+                if let i = indices[k] { at = i; break }
+            }
+            if let i = at {
+                merged[i] = mergeDuplicates(merged[i], parcel)
+                for k in parcelDuplicateKeys(mailNo: merged[i].mailNo ?? "", orderId: merged[i].orderId ?? "") {
+                    indices[k] = i
                 }
-                if existing.trackCompany == nil || existing.trackCompany?.isEmpty == true {
-                    existing.trackCompany = parcel.trackCompany
-                }
-                if existing.mailNo == nil { existing.mailNo = parcel.mailNo }
-                if existing.shipperCode == nil { existing.shipperCode = parcel.shipperCode }
-                if existing.orderId == nil { existing.orderId = parcel.orderId }
-                if existing.code.isEmpty { existing.code = parcel.code }
-                if existing.courierStationName.isEmpty { existing.courierStationName = parcel.courierStationName }
-                if existing.courierStationUuid.isEmpty { existing.courierStationUuid = parcel.courierStationUuid }
-                if existing.address.isEmpty { existing.address = parcel.address }
-                for code in ([parcel.code] + parcel.codes).filter({ !$0.isEmpty }) {
-                    if !existing.codes.contains(code) { existing.codes.append(code) }
-                }
-                if parcel.trackNodes.count > existing.trackNodes.count {
-                    existing.trackNodes = parcel.trackNodes
-                    existing.trackLatest = parcel.trackLatest
-                    existing.trackUpdatedAt = parcel.trackUpdatedAt
-                } else if existing.trackLatest == nil { existing.trackLatest = parcel.trackLatest }
-                if parcel.pickedByUser || parcel.isDone && !existing.isDone {
-                    existing.status = 2
-                    existing.pickedByUser = parcel.pickedByUser
-                    existing.pickedAt = parcel.pickedAt ?? existing.pickedAt
-                }
-                if existing.arrivedAt == nil { existing.arrivedAt = parcel.arrivedAt }
-                if existing.srcApp == nil { existing.srcApp = parcel.srcApp }
-                if existing.source == nil { existing.source = parcel.source }
-                existing.createdAt = min(existing.createdAt, parcel.createdAt)
-                merged[i] = existing
             } else {
-                indices[key] = merged.count
+                let idx = merged.count
                 merged.append(parcel)
+                for k in keys { indices[k] = idx }
             }
         }
         return merged
+    }
+
+    /// Port of dedupe.ts mergeTwo: the record with the newer track update
+    /// (falling back to creation time) is the base; the other one only
+    /// contributes codes, title, station, address and state. A picked
+    /// record never merges back into "to collect".
+    private static func mergeDuplicates(_ prev: Parcel, _ p: Parcel) -> Parcel {
+        let prevTime = prev.trackUpdatedAt ?? prev.createdAt
+        let pTime = p.trackUpdatedAt ?? p.createdAt
+        let fresher = pTime > prevTime ? p : prev
+        let older = fresher.uuid == p.uuid ? prev : p
+        var merged = fresher
+        merged.uuid = prev.uuid
+        if prev.status == 2 || p.status == 2 { merged.status = 2 }
+        merged.pickedByUser = prev.pickedByUser || p.pickedByUser
+        merged.pickedAt = prev.pickedAt ?? p.pickedAt
+        if merged.userTitle == nil { merged.userTitle = older.userTitle }
+        if merged.itemTitle == nil || merged.itemTitle?.isEmpty == true || merged.itemTitle == "拼多多订单" {
+            if let title = older.itemTitle, !title.isEmpty { merged.itemTitle = title }
+        }
+        if merged.trackCompany == nil || merged.trackCompany?.isEmpty == true {
+            merged.trackCompany = older.trackCompany
+        }
+        if merged.mailNo == nil { merged.mailNo = older.mailNo }
+        if merged.shipperCode == nil { merged.shipperCode = older.shipperCode }
+        if merged.orderId == nil { merged.orderId = older.orderId }
+        if merged.code.isEmpty { merged.code = older.code }
+        if merged.courierStationName.isEmpty { merged.courierStationName = older.courierStationName }
+        if merged.courierStationUuid.isEmpty { merged.courierStationUuid = older.courierStationUuid }
+        if merged.address.isEmpty { merged.address = older.address }
+        if merged.phone.isEmpty { merged.phone = older.phone }
+        if merged.eta == nil { merged.eta = older.eta }
+        if merged.etaAt == nil { merged.etaAt = older.etaAt }
+        if merged.trackUpdatedAt == nil { merged.trackUpdatedAt = older.trackUpdatedAt }
+        if merged.trackNodes.isEmpty { merged.trackNodes = older.trackNodes }
+        if merged.trackLatest == nil { merged.trackLatest = older.trackLatest }
+        if merged.arrivedAt == nil { merged.arrivedAt = older.arrivedAt }
+        if merged.srcApp == nil { merged.srcApp = older.srcApp }
+        if merged.source == nil { merged.source = older.source }
+        for code in ([older.code] + older.codes).filter({ !$0.isEmpty }) {
+            if !merged.codes.contains(code) { merged.codes.append(code) }
+        }
+        merged.createdAt = min(prev.createdAt, p.createdAt)
+        return merged
+    }
+
+    /// Central duplicate lookup: mail number first (normalized, so a
+    /// fullwidth digit or a dash does not hide a match), then platform
+    /// order id exact match. Used before a new parcel is created.
+    func findDuplicate(mailNo: String, orderId: String) -> Parcel? {
+        let keys = parcelDuplicateKeys(mailNo: mailNo, orderId: orderId)
+        guard !keys.isEmpty else { return nil }
+        for key in keys where key.hasPrefix("mail:") {
+            if let found = snapshot.parcels.first(where: {
+                parcelDuplicateKeys(mailNo: $0.mailNo ?? "", orderId: $0.orderId ?? "").contains(key)
+            }) { return found }
+        }
+        for key in keys where key.hasPrefix("order:") {
+            if let found = snapshot.parcels.first(where: {
+                parcelDuplicateKeys(mailNo: $0.mailNo ?? "", orderId: $0.orderId ?? "").contains(key)
+            }) { return found }
+        }
+        return nil
     }
 
     private init() {
@@ -153,8 +233,24 @@ import Combine
         Task { await LiveActivityCoordinator.update(with: enabled ? rows : []) }
     }
     func upsert(_ parcel: Parcel) {
-        if let i = snapshot.parcels.firstIndex(where: { $0.uuid == parcel.uuid }) { snapshot.parcels[i] = parcel }
-        else { snapshot.parcels.insert(parcel, at: 0) }
+        if let i = snapshot.parcels.firstIndex(where: { $0.uuid == parcel.uuid }) {
+            snapshot.parcels[i] = parcel
+        } else if let dup = findDuplicate(mailNo: parcel.mailNo ?? "", orderId: parcel.orderId ?? ""),
+                  let i = snapshot.parcels.firstIndex(where: { $0.uuid == dup.uuid }) {
+            // A new record for an already-known mail number or order id
+            // merges into the existing card instead of creating a second
+            // one. A picked card never reverts to "to collect" this way.
+            var merged = parcel
+            merged.uuid = dup.uuid
+            if dup.isDone {
+                merged.status = 2
+                merged.pickedByUser = dup.pickedByUser
+                merged.pickedAt = dup.pickedAt ?? merged.pickedAt
+            }
+            snapshot.parcels[i] = merged
+        } else {
+            snapshot.parcels.insert(parcel, at: 0)
+        }
         persist()
     }
     /// Avoid duplicates when an SMS automation runs more than once. A pickup
@@ -200,6 +296,9 @@ import Combine
     /// Only called after the user reviews the imported details and confirms save.
     /// For duplicates, update selected fields without resetting pickup state or history.
     func importDouyin(_ incoming: Parcel) -> Bool {
+        // The user explicitly confirmed this import, so a previous manual
+        // delete of the same shipment no longer blocks it.
+        removeDeletion(mail: incoming.mailNo ?? "", order: incoming.orderId ?? "")
         guard let mail = incoming.mailNo?.trimmingCharacters(in: .whitespacesAndNewlines), !mail.isEmpty else {
             upsert(incoming)
             return false
