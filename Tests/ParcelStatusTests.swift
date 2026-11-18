@@ -52,6 +52,21 @@ struct ParcelStatusTests {
                      "station signing on behalf must stay not picked")
         precondition(!parcel(latest: "快件运输中").latestPickupConfirmed,
                      "genuinely in-transit parcel must stay not picked")
+        // Screenshots 2026-11-18 19:02: two more parcels showing 运输中
+        // after signing. 773448582203513 was signed by the station
+        // ("【驿站】包裹已签收……已经妥投") — not picked, but signed, so the
+        // badge must read 已签收, never 运输中. 79032142932381 is the same
+        // "完成取件" wording as the ZTO case, on a different parcel.
+        precondition(!parcel(latest: "【驿站】包裹已签收！如有问题请联系：代收点16657897305，您的快递已经妥投，投诉电话：037961271875，可关注“申通快递”官方微信公众号获取实时物流信息").latestPickupConfirmed,
+                     "station-signed 773448582203513 must stay not picked")
+        precondition(parcel(latest: "【驿站】包裹已签收！如有问题请联系：代收点16657897305，您的快递已经妥投，投诉电话：037961271875，可关注“申通快递”官方微信公众号获取实时物流信息").isSigned,
+                     "station-signed 773448582203513 should show 已签收")
+        precondition(parcel(latest: "【驿站】包裹已签收！如有问题请联系：代收点16657897305，您的快递已经妥投，投诉电话：037961271875，可关注“申通快递”官方微信公众号获取实时物流信息").displayStatus == "已签收",
+                     "station-signed 773448582203513 displayStatus should be 已签收")
+        precondition(parcel(latest: "您已在新师范35号楼西头校园菜鸟驿站完成取件，感谢使用菜鸟驿站，期待再次为您服务。").latestPickupConfirmed,
+                     "完成取件 79032142932381 should be picked")
+        precondition(parcel(latest: "您已在新师范35号楼西头校园菜鸟驿站完成取件，感谢使用菜鸟驿站，期待再次为您服务。").displayStatus == "已取件",
+                     "完成取件 79032142932381 displayStatus should be 已取件")
         // Display status follows the same rule.
         precondition(parcel(latest: "快件已取件").isDone, "已取件 should be done")
         precondition(parcel(latest: "快件已取件").displayStatus == "已取件",
@@ -60,6 +75,6 @@ struct ParcelStatusTests {
                      "station-signed parcel should show 已签收, not 已取件")
         precondition(parcel(latest: "快件运输中").isTransit,
                      "in-transit parcel should stay in transit")
-        print("PASS ParcelStatusTests (16 checks)")
+        print("PASS ParcelStatusTests (21 checks)")
     }
 }

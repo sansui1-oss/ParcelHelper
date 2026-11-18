@@ -63,6 +63,8 @@ CASES = [
     (["快件已到达XX转运中心"], "", "", False, "transit hub arrival"),
     (["您已取件"], "", "", True, "already worked before"),
     (["已领取"], "", "", True, "already worked before"),
+    (["【驿站】包裹已签收！如有问题请联系：代收点16657897305，您的快递已经妥投，投诉电话：037961271875，可关注“申通快递”官方微信公众号获取实时物流信息"], "", "", False, "screenshot 773448582203513: station-signed, must stay NOT picked"),
+    (["您已在新师范35号楼西头校园菜鸟驿站完成取件，感谢使用菜鸟驿站，期待再次为您服务。"], "", "", True, "screenshot 79032142932381: 完成取件"),
 ]
 
 fails = 0
