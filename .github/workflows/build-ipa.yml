@@ -1,10 +1,13 @@
 name: Build ParcelHelper IPA
 
-# Official releases are created only when a version tag is pushed.
+# Upstream builds only on version tags. This fork also builds on pushes to
+# main (and manual runs), so a fix can be tried without cutting a tag.
 on:
   push:
+    branches: [main]
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -23,27 +26,46 @@ jobs:
         with:
           fetch-depth: 0  # Include tags/history so release notes can compare changes
 
-      - name: Determine version from pushed tag
+      - name: Determine release version
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          if [[ ! "$tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-            echo "Release tag must use vMAJOR.MINOR.PATCH (for example v1.0.5): $tag" >&2
-            exit 1
+          if [[ "$tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            major="${BASH_REMATCH[1]}"
+            minor="${BASH_REMATCH[2]}"
+            patch="${BASH_REMATCH[3]}"
+            version="${tag#v}"
+            build_number="$((10#$major * 1000000 + 10#$minor * 1000 + 10#$patch))"
+          else
+            # Push to main (no tag): use the next patch after the latest
+            # release, starting at 1.0.0 when there is none yet.
+            latest="$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""')"
+            if [[ -z "$latest" ]]; then
+              version="1.0.0"
+              build_number=1000
+            elif [[ ! "$latest" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              echo "Unexpected release tag: $latest" >&2
+              exit 1
+            else
+              major="${BASH_REMATCH[1]}"
+              minor="${BASH_REMATCH[2]}"
+              patch="${BASH_REMATCH[3]}"
+              next_patch=$((10#$patch + 1))
+              version="$major.$minor.$next_patch"
+              build_number=$((1000 + next_patch))
+            fi
+            tag="v$version"
           fi
-          major="${BASH_REMATCH[1]}"
-          minor="${BASH_REMATCH[2]}"
-          patch="${BASH_REMATCH[3]}"
-          version="${tag#v}"
-          build_number="$((10#$major * 1000000 + 10#$minor * 1000 + 10#$patch))"
           previous_tag="$(git tag --merged HEAD --list 'v[0-9]*' --sort=-version:refname |
             grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' |
             grep -Fxv "$tag" | head -n 1 || true)"
           echo "APP_VERSION=$version" >> "$GITHUB_ENV"
           echo "BUILD_NUMBER=$build_number" >> "$GITHUB_ENV"
           echo "PREVIOUS_TAG=$previous_tag" >> "$GITHUB_ENV"
-          echo "Publishing tag $tag (build $build_number), previous: ${previous_tag:-none}"
+          echo "Publishing v$version (build $build_number), previous: ${previous_tag:-none}"
 
       - name: Generate dark appearance icon (Swift)
         run: |
